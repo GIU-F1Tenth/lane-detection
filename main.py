@@ -2,12 +2,106 @@ import cv2  # Import the OpenCV library to enable computer vision
 import numpy as np  # Import the NumPy scientific computing library
 import edge_detection as edge  # Handles the detection of lane lines
 import matplotlib.pyplot as plt  # Used for plotting and error checking
+import argparse  # Parse command line arguments
 
 # Author: Addison Sears-Collins
 # https://automaticaddison.com
 # Description: Implementation of the Lane class
 
-filename = 'original_lane_detection_5.jpg'
+
+class LaneConfig:
+    """
+    Centralized configuration for lane detection parameters
+    """
+    # Region of Interest (ROI) - Perspective Transform
+    ROI_TOP_LEFT = (int(640 * 0.45), int(480 * 0.8))      # Top-left corner
+    ROI_BOTTOM_LEFT = (int(640 * 0.3), int(480 * 0.95))   # Bottom-left corner
+    ROI_BOTTOM_RIGHT = (int(640 * 0.55), int(480 * 0.95)
+                        )  # Bottom-right corner
+    ROI_TOP_RIGHT = (int(640 * 0.55), int(480 * 0.8))     # Top-right corner
+
+    # Perspective transform padding (percentage of image width)
+    PERSPECTIVE_PADDING = 0.25
+
+    # Sliding window parameters
+    NUM_WINDOWS = 9              # Number of sliding windows
+    WINDOW_MARGIN_RATIO = 1/12   # Window width ratio (relative to image width)
+    MIN_PIXELS_RATIO = 1/24      # Minimum pixels to recenter window
+
+    # Edge detection thresholds
+    LIGHTNESS_THRESH = (120, 255)  # L channel threshold
+    SOBEL_KERNEL = 3               # Sobel kernel size
+    SOBEL_THRESH = (110, 255)      # Sobel magnitude threshold
+    GAUSSIAN_BLUR_KERNEL = 3       # Gaussian blur kernel size
+
+    # Color channel thresholds
+    # S channel threshold (increased for better lane detection)
+    SATURATION_THRESH = (100, 255)
+    # R channel threshold (increased for white/yellow lanes)
+    RED_CHANNEL_THRESH = (200, 255)
+
+    # Pixel to real-world conversion
+    # meters per pixel in y dimension (adjusted for typical road)
+    YM_PER_PIX = 30.0 / 720
+    # meters per pixel in x dimension (standard US lane width)
+    XM_PER_PIX = 3.7 / 700
+
+    # Display settings
+    FONT_SCALE_RATIO = 0.6 / 600  # Font scale relative to image width
+    TEXT_THICKNESS = 2
+    TEXT_COLOR = (255, 255, 255)
+    TEXT_Y_OFFSET_1 = 30  # First line offset
+    TEXT_Y_OFFSET_2 = 60  # Second line offset
+    TEXT_X_OFFSET = 10
+
+    # Lane overlay settings
+    LANE_COLOR = (0, 255, 0)  # Green
+    LANE_ALPHA = 0.3          # Transparency
+
+    # ROI overlay settings
+    SHOW_ROI = True                    # Show ROI overlay on output
+    ROI_COLOR = (0, 165, 255)          # Orange color in BGR
+    ROI_ALPHA = 0.2                    # ROI transparency (0.0-1.0)
+    ROI_BORDER_COLOR = (0, 165, 255)   # Orange border
+    ROI_BORDER_THICKNESS = 2           # Border thickness in pixels
+
+    @classmethod
+    def get_roi_points(cls, width, height):
+        """
+        Get ROI points scaled to actual image dimensions
+
+        :param width: Image width
+        :param height: Image height
+        :return: ROI points as numpy array
+        """
+        scale_x = width / 640
+        scale_y = height / 480
+
+        return np.float32([
+            (cls.ROI_TOP_LEFT[0] * scale_x, cls.ROI_TOP_LEFT[1] * scale_y),
+            (cls.ROI_BOTTOM_LEFT[0] * scale_x,
+             cls.ROI_BOTTOM_LEFT[1] * scale_y),
+            (cls.ROI_BOTTOM_RIGHT[0] * scale_x,
+             cls.ROI_BOTTOM_RIGHT[1] * scale_y),
+            (cls.ROI_TOP_RIGHT[0] * scale_x, cls.ROI_TOP_RIGHT[1] * scale_y)
+        ])
+
+    @classmethod
+    def get_desired_roi_points(cls, width, height):
+        """
+        Get desired ROI points after perspective transform
+
+        :param width: Image width
+        :param height: Image height
+        :return: Desired ROI points as numpy array
+        """
+        padding = int(cls.PERSPECTIVE_PADDING * width)
+        return np.float32([
+            [padding, 0],
+            [padding, height],
+            [width - padding, height],
+            [width - padding, 0]
+        ])
 
 
 class Lane:
@@ -15,13 +109,15 @@ class Lane:
     Represents a lane on a road.
     """
 
-    def __init__(self, orig_frame):
+    def __init__(self, orig_frame, config=None):
         """
           Default constructor
 
         :param orig_frame: Original camera image (i.e. frame)
+        :param config: LaneConfig object (optional, uses default if None)
         """
         self.orig_frame = orig_frame
+        self.config = config if config is not None else LaneConfig()
 
         # This will hold an image with the lane lines
         self.lane_line_markings = None
@@ -40,36 +136,20 @@ class Lane:
         self.height = height
 
         # Four corners of the trapezoid-shaped region of interest
-        # You need to find these corners manually.
-        self.roi_points = np.float32([
-            (274, 184),  # Top-left corner
-            (0, 337),  # Bottom-left corner
-            (575, 337),  # Bottom-right corner
-            (371, 184)  # Top-right corner
-        ])
+        self.roi_points = self.config.get_roi_points(width, height)
 
-        # The desired corner locations  of the region of interest
+        # The desired corner locations of the region of interest
         # after we perform perspective transformation.
-        # Assume image width of 600, padding == 150.
-        # padding from side of the image in pixels
-        self.padding = int(0.25 * width)
-        self.desired_roi_points = np.float32([
-            [self.padding, 0],  # Top-left corner
-            [self.padding, self.orig_image_size[1]],  # Bottom-left corner
-            [self.orig_image_size[
-                # Bottom-right corner
-                0]-self.padding, self.orig_image_size[1]],
-            [self.orig_image_size[0]-self.padding, 0]  # Top-right corner
-        ])
+        self.desired_roi_points = self.config.get_desired_roi_points(
+            width, height)
 
         # Histogram that shows the white pixel peaks for lane line detection
         self.histogram = None
 
         # Sliding window parameters
-        self.no_of_windows = 10
-        self.margin = int((1/12) * width)  # Window width is +/- margin
-        # Min no. of pixels to recenter window
-        self.minpix = int((1/24) * width)
+        self.no_of_windows = self.config.NUM_WINDOWS
+        self.margin = int(self.config.WINDOW_MARGIN_RATIO * width)
+        self.minpix = int(self.config.MIN_PIXELS_RATIO * width)
 
         # Best fit polynomial lines for left line and right line of the lane
         self.left_fit = None
@@ -85,8 +165,8 @@ class Lane:
         self.righty = None
 
         # Pixel parameters for x and y dimensions
-        self.YM_PER_PIX = 10.0 / 1000  # meters per pixel in y dimension
-        self.XM_PER_PIX = 3.7 / 781  # meters per pixel in x dimension
+        self.YM_PER_PIX = self.config.YM_PER_PIX
+        self.XM_PER_PIX = self.config.XM_PER_PIX
 
         # Radii of curvature and offset
         self.left_curvem = None
@@ -196,17 +276,23 @@ class Lane:
             image_copy = frame
 
         cv2.putText(image_copy, 'Curve Radius: '+str((
-            self.left_curvem+self.right_curvem)/2)[:7]+' m', (int((
-                5/600)*self.width), int((
-                    20/338)*self.height)), cv2.FONT_HERSHEY_SIMPLEX, (float((
-                        0.5/600)*self.width)), (
-            255, 255, 255), 2, cv2.LINE_AA)
+            self.left_curvem+self.right_curvem)/2)[:7]+' m', (
+                self.config.TEXT_X_OFFSET,
+                self.config.TEXT_Y_OFFSET_1),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            (float(self.config.FONT_SCALE_RATIO * self.width)),
+            self.config.TEXT_COLOR,
+            self.config.TEXT_THICKNESS,
+            cv2.LINE_AA)
         cv2.putText(image_copy, 'Center Offset: '+str(
-            self.center_offset)[:7]+' cm', (int((
-                5/600)*self.width), int((
-                    40/338)*self.height)), cv2.FONT_HERSHEY_SIMPLEX, (float((
-                        0.5/600)*self.width)), (
-            255, 255, 255), 2, cv2.LINE_AA)
+            self.center_offset)[:7]+' cm', (
+                self.config.TEXT_X_OFFSET,
+                self.config.TEXT_Y_OFFSET_2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            (float(self.config.FONT_SCALE_RATIO * self.width)),
+            self.config.TEXT_COLOR,
+            self.config.TEXT_THICKNESS,
+            cv2.LINE_AA)
 
         if plot == True:
             cv2.imshow("Image with Curvature and Offset", image_copy)
@@ -253,6 +339,11 @@ class Lane:
         self.lefty = lefty
         self.righty = righty
 
+        # Check if we have enough points to fit a polynomial
+        if len(lefty) == 0 or len(leftx) == 0 or len(righty) == 0 or len(rightx) == 0:
+            # Keep using previous fit if no points detected
+            return
+
         # Fit a second order polynomial curve to each lane line
         left_fit = np.polyfit(lefty, leftx, 2)
         right_fit = np.polyfit(righty, rightx, 2)
@@ -296,8 +387,8 @@ class Lane:
                 (right_line_window1, right_line_window2))
 
             # Draw the lane onto the warped blank image
-            cv2.fillPoly(window_img, np.int_([left_line_pts]), (0, 255, 0))
-            cv2.fillPoly(window_img, np.int_([right_line_pts]), (0, 255, 0))
+            cv2.fillPoly(window_img, np.int32([left_line_pts]), (0, 255, 0))
+            cv2.fillPoly(window_img, np.int32([right_line_pts]), (0, 255, 0))
             result = cv2.addWeighted(out_img, 1, window_img, 0.3, 0)
 
             # Plot the figures
@@ -328,7 +419,7 @@ class Lane:
         frame_sliding_window = self.warped_frame.copy()
 
         # Set the height of the sliding windows
-        window_height = np.int(self.warped_frame.shape[0]/self.no_of_windows)
+        window_height = np.int32(self.warped_frame.shape[0]/self.no_of_windows)
 
         # Find the x and y coordinates of all the nonzero
         # (i.e. white) pixels in the frame.
@@ -379,9 +470,9 @@ class Lane:
             # If you found > minpix pixels, recenter next window on mean position
             minpix = self.minpix
             if len(good_left_inds) > minpix:
-                leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
+                leftx_current = np.int32(np.mean(nonzerox[good_left_inds]))
             if len(good_right_inds) > minpix:
-                rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
+                rightx_current = np.int32(np.mean(nonzerox[good_right_inds]))
 
         # Concatenate the arrays of indices
         left_lane_inds = np.concatenate(left_lane_inds)
@@ -392,6 +483,9 @@ class Lane:
         lefty = nonzeroy[left_lane_inds]
         rightx = nonzerox[right_lane_inds]
         righty = nonzeroy[right_lane_inds]
+
+        if len(lefty) == 0 or len(leftx) == 0 or len(righty) == 0 or len(rightx) == 0:
+            return None, None
 
         # Fit a second order polynomial curve to the pixel coordinates for
         # the left and right lane lines
@@ -458,12 +552,15 @@ class Lane:
         # along the x and y axis of the video frame.
         # sxbinary is a matrix full of 0s (black) and 255 (white) intensity values
         # Relatively light pixels get made white. Dark pixels get made black.
-        _, sxbinary = edge.threshold(hls[:, :, 1], thresh=(120, 255))
-        sxbinary = edge.blur_gaussian(sxbinary, ksize=3)  # Reduce noise
+        _, sxbinary = edge.threshold(
+            hls[:, :, 1], thresh=self.config.LIGHTNESS_THRESH)
+        sxbinary = edge.blur_gaussian(
+            sxbinary, ksize=self.config.GAUSSIAN_BLUR_KERNEL)  # Reduce noise
 
         # 1s will be in the cells with the highest Sobel derivative values
         # (i.e. strongest lane line edges)
-        sxbinary = edge.mag_thresh(sxbinary, sobel_kernel=3, thresh=(110, 255))
+        sxbinary = edge.mag_thresh(
+            sxbinary, sobel_kernel=self.config.SOBEL_KERNEL, thresh=self.config.SOBEL_THRESH)
 
         ######################## Isolate possible lane lines ######################
 
@@ -475,7 +572,7 @@ class Lane:
         # White in the regions with the purest hue colors (e.g. >80...play with
         # this value for best results).
         s_channel = hls[:, :, 2]  # use only the saturation channel data
-        _, s_binary = edge.threshold(s_channel, (80, 255))
+        _, s_binary = edge.threshold(s_channel, self.config.SATURATION_THRESH)
 
         # Perform binary thresholding on the R (red) channel of the
         # original BGR video frame.
@@ -483,7 +580,8 @@ class Lane:
         # White in the regions with the richest red channel values (e.g. >120).
         # Remember, pure white is bgr(255, 255, 255).
         # Pure yellow is bgr(0, 255, 255). Both have high red channel values.
-        _, r_thresh = edge.threshold(frame[:, :, 2], thresh=(120, 255))
+        _, r_thresh = edge.threshold(
+            frame[:, :, 2], thresh=self.config.RED_CHANNEL_THRESH)
 
         # Lane lines should be pure in color and have high red channel values
         # Bitwise AND operation to reduce noise and black-out any pixels that
@@ -505,7 +603,7 @@ class Lane:
         Return the x coordinate of the left histogram peak and the right histogram
         peak.
         """
-        midpoint = np.int(self.histogram.shape[0]/2)
+        midpoint = np.int32(self.histogram.shape[0]/2)
         leftx_base = np.argmax(self.histogram[:midpoint])
         rightx_base = np.argmax(self.histogram[midpoint:]) + midpoint
 
@@ -530,7 +628,7 @@ class Lane:
         pts = np.hstack((pts_left, pts_right))
 
         # Draw lane on the warped blank image
-        cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
+        cv2.fillPoly(color_warp, np.int32([pts]), self.config.LANE_COLOR)
 
         # Warp the blank back to original image space using inverse perspective
         # matrix (Minv)
@@ -539,7 +637,8 @@ class Lane:
                                           1], self.orig_frame.shape[0]))
 
         # Combine the result with the original image
-        result = cv2.addWeighted(self.orig_frame, 1, newwarp, 0.3, 0)
+        result = cv2.addWeighted(
+            self.orig_frame, 1, newwarp, self.config.LANE_ALPHA, 0)
 
         if plot == True:
 
@@ -586,7 +685,7 @@ class Lane:
         # Display the perspective transformed (i.e. warped) frame
         if plot == True:
             warped_copy = self.warped_frame.copy()
-            warped_plot = cv2.polylines(warped_copy, np.int32([
+            warped_plot = cv2.polylines(warped_copy, np.int3232([
                 self.desired_roi_points]), True, (147, 20, 255), 3)
 
             # Display the image
@@ -614,7 +713,7 @@ class Lane:
             frame = self.orig_frame.copy()
 
         # Overlay trapezoid on the frame
-        this_image = cv2.polylines(frame, np.int32([
+        this_image = cv2.polylines(frame, np.int3232([
             self.roi_points]), True, (147, 20, 255), 3)
 
         # Display the image
@@ -627,65 +726,292 @@ class Lane:
 
         cv2.destroyAllWindows()
 
+    def draw_roi_overlay(self, frame):
+        """
+        Draw a faded ROI overlay on the frame to show the detection region
 
-def main():
+        :param frame: Frame to draw ROI on
+        :return: Frame with ROI overlay
+        """
+        if not self.config.SHOW_ROI:
+            return frame
 
-    # Load a frame (or image)
-    original_frame = cv2.imread(filename)
+        # Create a copy to draw on
+        overlay = frame.copy()
+        output = frame.copy()
 
-    # Create a Lane object
-    lane_obj = Lane(orig_frame=original_frame)
+        # Convert ROI points to integer array
+        roi_pts = np.array([self.roi_points], dtype=np.int32)
 
-    # Perform thresholding to isolate lane lines
-    lane_line_markings = lane_obj.get_line_markings()
+        # Draw filled polygon for the faded effect
+        cv2.fillPoly(overlay, roi_pts, self.config.ROI_COLOR)
 
-    # Plot the region of interest on the image
-    lane_obj.plot_roi(plot=False)
+        # Blend the overlay with the original frame
+        cv2.addWeighted(overlay, self.config.ROI_ALPHA, output,
+                        1 - self.config.ROI_ALPHA, 0, output)
 
-    # Perform the perspective transform to generate a bird's eye view
-    # If Plot == True, show image with new region of interest
-    warped_frame = lane_obj.perspective_transform(plot=False)
+        # Draw border around ROI
+        cv2.polylines(output, roi_pts, True, self.config.ROI_BORDER_COLOR,
+                      self.config.ROI_BORDER_THICKNESS, cv2.LINE_AA)
 
-    # Generate the image histogram to serve as a starting point
-    # for finding lane line pixels
-    histogram = lane_obj.calculate_histogram(plot=False)
+        return output
 
-    # Find lane line pixels using the sliding window method
-    left_fit, right_fit = lane_obj.get_lane_line_indices_sliding_windows(
-        plot=False)
 
-    # Fill in the lane line
-    lane_obj.get_lane_line_previous_window(left_fit, right_fit, plot=False)
+def process_frame(frame, config=None):
+    """
+    Process a single frame for lane detection
 
-    # Overlay lines on the original frame
-    frame_with_lane_lines = lane_obj.overlay_lane_lines(plot=False)
+    :param frame: Input frame to process
+    :param config: LaneConfig object (optional)
+    :return: Frame with lane lines and statistics overlay
+    """
+    try:
+        # Create a Lane object
+        lane_obj = Lane(orig_frame=frame, config=config)
 
-    # Calculate lane line curvature (left and right lane lines)
-    lane_obj.calculate_curvature(print_to_terminal=False)
+        # Perform thresholding to isolate lane lines
+        lane_line_markings = lane_obj.get_line_markings()
 
-    # Calculate center offset
-    lane_obj.calculate_car_position(print_to_terminal=False)
+        # Perform the perspective transform to generate a bird's eye view
+        warped_frame = lane_obj.perspective_transform(plot=False)
 
-    # Display curvature and center offset on image
-    frame_with_lane_lines2 = lane_obj.display_curvature_offset(
-        frame=frame_with_lane_lines, plot=True)
+        # Generate the image histogram to serve as a starting point
+        # for finding lane line pixels
+        histogram = lane_obj.calculate_histogram(plot=False)
 
-    # Create the output file name by removing the '.jpg' part
-    size = len(filename)
-    new_filename = filename[:size - 4]
-    new_filename = new_filename + '_thresholded.jpg'
+        # Find lane line pixels using the sliding window method
+        left_fit, right_fit = lane_obj.get_lane_line_indices_sliding_windows(
+            plot=False)
 
-    # Save the new image in the working directory
-    # cv2.imwrite(new_filename, lane_line_markings)
+        # Check if lane detection was successful
+        if left_fit is None or right_fit is None:
+            # Return original frame if no lanes detected
+            return frame
+
+        # Fill in the lane line
+        lane_obj.get_lane_line_previous_window(left_fit, right_fit, plot=False)
+
+        # Overlay lines on the original frame
+        frame_with_lane_lines = lane_obj.overlay_lane_lines(plot=False)
+
+        # Calculate lane line curvature (left and right lane lines)
+        lane_obj.calculate_curvature(print_to_terminal=False)
+
+        # Calculate center offset
+        lane_obj.calculate_car_position(print_to_terminal=False)
+
+        # Display curvature and center offset on image
+        frame_with_lane_lines2 = lane_obj.display_curvature_offset(
+            frame=frame_with_lane_lines, plot=False)
+
+        # Draw ROI overlay to show the detection region
+        final_frame = lane_obj.draw_roi_overlay(frame_with_lane_lines2)
+
+        return final_frame
+    except Exception as e:
+        # Return original frame if any error occurs
+        print(f"Warning: Frame processing failed - {e}")
+        return frame
+
+
+def process_image(image_path, output_path=None, config=None):
+    """
+    Process a single image for lane detection
+
+    :param image_path: Path to the input image
+    :param output_path: Optional path to save the output image
+    :param config: LaneConfig object (optional)
+    """
+    # Load the image
+    original_frame = cv2.imread(image_path)
+
+    if original_frame is None:
+        print(f"Error: Could not load image from {image_path}")
+        return
+
+    # Process the frame
+    result = process_frame(original_frame, config)
+
+    # Save output if path provided
+    if output_path:
+        cv2.imwrite(output_path, result)
+        print(f"Output saved to {output_path}")
 
     # Display the image
-    # cv2.imshow("Image", lane_line_markings)
-
-    # Display the window until any key is pressed
+    cv2.imshow("Lane Detection Result", result)
     cv2.waitKey(0)
-
-    # Close all windows
     cv2.destroyAllWindows()
 
 
-main()
+def process_video(video_path, output_path=None, config=None):
+    """
+    Process a video file for lane detection
+
+    :param video_path: Path to the input video
+    :param output_path: Optional path to save the output video
+    :param config: LaneConfig object (optional)
+    """
+    # Open the video file
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        print(f"Error: Could not open video from {video_path}")
+        return
+
+    # Get video properties
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+    # Initialize video writer if output path provided
+    out = None
+    if output_path:
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps,
+                              (frame_width, frame_height))
+
+    print("Processing video... Press 'q' to quit.")
+
+    while True:
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        # Process the frame
+        result = process_frame(frame, config)
+
+        # Write to output video if specified
+        if out:
+            out.write(result)
+
+        # Display the result
+        cv2.imshow("Lane Detection - Video", result)
+
+        # Press 'q' to quit
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Release resources
+    cap.release()
+    if out:
+        out.release()
+        print(f"Output video saved to {output_path}")
+    cv2.destroyAllWindows()
+
+
+def process_camera(camera_id=0, output_path=None, config=None):
+    """
+    Process live camera feed for lane detection
+
+    :param camera_id: Camera device ID (default: 0)
+    :param output_path: Optional path to save the output video
+    :param config: LaneConfig object (optional)
+    """
+    # Open the camera
+    cap = cv2.VideoCapture(camera_id)
+
+    if not cap.isOpened():
+        print(f"Error: Could not open camera with ID {camera_id}")
+        return
+
+    # Get camera properties
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = 20  # Set a default fps for recording
+
+    # Initialize video writer if output path provided
+    out = None
+    if output_path:
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps,
+                              (frame_width, frame_height))
+
+    print("Processing camera feed... Press 'q' to quit.")
+
+    while True:
+        ret, frame = cap.read()
+
+        if not ret:
+            print("Error: Failed to capture frame from camera")
+            break
+
+        # Process the frame
+        result = process_frame(frame, config)
+
+        # Write to output video if specified
+        if out:
+            out.write(result)
+
+        # Display the result
+        cv2.imshow("Lane Detection - Camera", result)
+
+        # Press 'q' to quit
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Release resources
+    cap.release()
+    if out:
+        out.release()
+        print(f"Output video saved to {output_path}")
+    cv2.destroyAllWindows()
+
+
+def main():
+    """
+    Main function with argument parsing
+    """
+    parser = argparse.ArgumentParser(description='Lane Detection System')
+    parser.add_argument('--mode', type=str, choices=['image', 'video', 'camera'],
+                        default='image', help='Processing mode: image, video, or camera')
+    parser.add_argument('--input', type=str,
+                        help='Input file path (for image or video mode)')
+    parser.add_argument('--output', type=str,
+                        help='Output file path (optional)')
+    parser.add_argument('--camera-id', type=int, default=0,
+                        help='Camera device ID (default: 0, for camera mode)')
+    parser.add_argument('--config', type=str,
+                        help='Path to custom configuration file (optional)')
+
+    args = parser.parse_args()
+
+    # Load configuration if provided
+    config = LaneConfig()
+    if args.config:
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "custom_config", args.config)
+            custom_config_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(custom_config_module)
+
+            # Override default config values
+            for attr in dir(custom_config_module):
+                if not attr.startswith('_') and hasattr(config, attr):
+                    setattr(config, attr, getattr(custom_config_module, attr))
+            print(f"Loaded custom configuration from {args.config}")
+        except Exception as e:
+            print(f"Warning: Could not load config file {args.config}: {e}")
+            print("Using default configuration")
+
+    if args.mode == 'image':
+        if not args.input:
+            print("Error: --input is required for image mode")
+            parser.print_help()
+            return
+        process_image(args.input, args.output, config)
+
+    elif args.mode == 'video':
+        if not args.input:
+            print("Error: --input is required for video mode")
+            parser.print_help()
+            return
+        process_video(args.input, args.output, config)
+
+    elif args.mode == 'camera':
+        process_camera(args.camera_id, args.output, config)
+
+
+if __name__ == '__main__':
+    main()
