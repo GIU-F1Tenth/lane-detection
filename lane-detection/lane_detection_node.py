@@ -17,7 +17,6 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Header
 from cv_bridge import CvBridge
-import cv2
 import numpy as np
 from .main import process_frame
 from .lane_utils import visualize_boundaries_and_midline
