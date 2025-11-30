@@ -1,8 +1,11 @@
-import cv2  # Import the OpenCV library to enable computer vision
-import numpy as np  # Import the NumPy scientific computing library
-import edge_detection as edge  # Handles the detection of lane lines
-import matplotlib.pyplot as plt  # Used for plotting and error checking
-import argparse  # Parse command line arguments
+import cv2
+import numpy as np
+import edge_detection as edge
+import matplotlib.pyplot as plt
+import argparse
+import time
+from lane_data import LaneDetectionResult
+from lane_utils import extract_boundary_points, calculate_midline, visualize_boundaries_and_midline
 
 # Author: Addison Sears-Collins
 # https://automaticaddison.com
@@ -757,60 +760,155 @@ class Lane:
         return output
 
 
-def process_frame(frame, config=None):
+def process_frame(frame, config=None, return_detection_result=False):
     """
     Process a single frame for lane detection
 
     :param frame: Input frame to process
     :param config: LaneConfig object (optional)
-    :return: Frame with lane lines and statistics overlay
+    :param return_detection_result: If True, return (frame, LaneDetectionResult), else just frame
+    :return: Frame with lane lines and statistics overlay, or tuple (frame, data)
     """
+    start_time = time.time()
+
     try:
         # Create a Lane object
-        lane_obj = Lane(orig_frame=frame, config=config)
+        lane = Lane(orig_frame=frame, config=config)
 
         # Perform thresholding to isolate lane lines
-        lane_line_markings = lane_obj.get_line_markings()
+        _ = lane.get_line_markings()
 
         # Perform the perspective transform to generate a bird's eye view
-        warped_frame = lane_obj.perspective_transform(plot=False)
+        _ = lane.perspective_transform(plot=False)
 
         # Generate the image histogram to serve as a starting point
         # for finding lane line pixels
-        histogram = lane_obj.calculate_histogram(plot=False)
+        _ = lane.calculate_histogram(plot=False)
 
         # Find lane line pixels using the sliding window method
-        left_fit, right_fit = lane_obj.get_lane_line_indices_sliding_windows(
+        left_fit, right_fit = lane.get_lane_line_indices_sliding_windows(
             plot=False)
 
         # Check if lane detection was successful
         if left_fit is None or right_fit is None:
-            # Return original frame if no lanes detected
-            return frame
+            final_frame = lane.draw_roi_overlay(frame)
+
+            if return_detection_result:
+                processing_time = (time.time() - start_time) * 1000
+                result = LaneDetectionResult(
+                    timestamp=time.time(),
+                    frame_id="camera",
+                    image_shape=frame.shape[:2],
+                    roi_points=lane.roi_points,
+                    processing_time_ms=processing_time,
+                    valid=False,
+                    confidence=0.0
+                )
+                return final_frame, result
+            return final_frame
 
         # Fill in the lane line
-        lane_obj.get_lane_line_previous_window(left_fit, right_fit, plot=False)
+        lane.get_lane_line_previous_window(left_fit, right_fit, plot=False)
 
         # Overlay lines on the original frame
-        frame_with_lane_lines = lane_obj.overlay_lane_lines(plot=False)
+        frame_with_lane_lines = lane.overlay_lane_lines(plot=False)
 
         # Calculate lane line curvature (left and right lane lines)
-        lane_obj.calculate_curvature(print_to_terminal=False)
+        lane.calculate_curvature(print_to_terminal=False)
 
         # Calculate center offset
-        lane_obj.calculate_car_position(print_to_terminal=False)
+        lane.calculate_car_position(print_to_terminal=False)
 
         # Display curvature and center offset on image
-        frame_with_lane_lines2 = lane_obj.display_curvature_offset(
+        frame_with_lane_lines2 = lane.display_curvature_offset(
             frame=frame_with_lane_lines, plot=False)
 
         # Draw ROI overlay to show the detection region
-        final_frame = lane_obj.draw_roi_overlay(frame_with_lane_lines2)
+        final_frame = lane.draw_roi_overlay(frame_with_lane_lines2)
+
+        # Extract structured data if requested
+        if return_detection_result:
+            # Extract left boundary
+            left_boundary = extract_boundary_points(
+                polynomial=lane.left_fit,
+                ploty=lane.ploty,
+                leftx=lane.leftx,
+                lefty=lane.lefty,
+                curvature_radius=lane.left_curvem,
+                num_points=50,
+                xm_per_pix=config.XM_PER_PIX,
+                ym_per_pix=config.YM_PER_PIX
+            )
+
+            # Extract right boundary
+            right_boundary = extract_boundary_points(
+                polynomial=lane.right_fit,
+                ploty=lane.ploty,
+                leftx=lane.rightx,
+                lefty=lane.righty,
+                curvature_radius=lane.right_curvem,
+                num_points=50,
+                xm_per_pix=config.XM_PER_PIX,
+                ym_per_pix=config.YM_PER_PIX
+            )
+
+            # Calculate midline
+            midline = calculate_midline(
+                left_boundary, right_boundary, num_points=50)
+
+            # Calculate lane width in meters
+            if left_boundary.valid and right_boundary.valid and len(left_boundary.points) > 0:
+                # Use bottom of image (index 0) for width calculation
+                lane_width = abs(
+                    right_boundary.points[0, 0] - left_boundary.points[0, 0])
+            else:
+                lane_width = 0.0
+
+            # Calculate average curvature radius
+            avg_curvature = (lane.left_curvem +
+                             lane.right_curvem) / 2.0
+
+            # Calculate overall confidence as average of boundary confidences
+            overall_confidence = (
+                left_boundary.confidence + right_boundary.confidence) / 2.0
+
+            # Calculate processing time
+            processing_time = (time.time() - start_time) * 1000
+
+            # Create detection result
+            result = LaneDetectionResult(
+                timestamp=time.time(),
+                frame_id="camera",
+                left_boundary=left_boundary,
+                right_boundary=right_boundary,
+                midline=midline,
+                center_offset=lane.center_offset / 100.0,  # Convert cm to meters
+                lane_width=lane_width,
+                avg_curvature_radius=avg_curvature,
+                image_shape=frame.shape[:2],
+                roi_points=lane.roi_points,
+                processing_time_ms=processing_time,
+                valid=True,
+                confidence=overall_confidence
+            )
+
+            return final_frame, result
 
         return final_frame
     except Exception as e:
         # Return original frame if any error occurs
         print(f"Warning: Frame processing failed - {e}")
+        if return_detection_result:
+            processing_time = (time.time() - start_time) * 1000
+            result = LaneDetectionResult(
+                timestamp=time.time(),
+                frame_id="camera",
+                image_shape=frame.shape[:2] if frame is not None else (0, 0),
+                processing_time_ms=processing_time,
+                valid=False,
+                confidence=0.0
+            )
+            return frame, result
         return frame
 
 
