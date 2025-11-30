@@ -928,15 +928,27 @@ def process_image(image_path, output_path=None, config=None):
         return
 
     # Process the frame
-    result = process_frame(original_frame, config)
-
+    frame, result = process_frame(
+        original_frame, config, return_detection_result=True)
+    print("Lane Detection Result:")
+    print(result)
     # Save output if path provided
     if output_path:
-        cv2.imwrite(output_path, result)
+        cv2.imwrite(output_path, frame)
         print(f"Output saved to {output_path}")
 
     # Display the image
-    cv2.imshow("Lane Detection Result", result)
+    cv2.imshow("Lane Detection Result", frame)
+    cv2.waitKey(0)
+
+    empty_frame = np.zeros_like(frame)
+    visualization = visualize_boundaries_and_midline(
+        empty_frame,
+        result.left_boundary,
+        result.right_boundary,
+        result.midline
+    )
+    cv2.imshow("Lane Detection Result", visualization)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
@@ -977,14 +989,24 @@ def process_video(video_path, output_path=None, config=None):
             break
 
         # Process the frame
-        result = process_frame(frame, config)
+        frame, lane_detection_result = process_frame(
+            frame, config, return_detection_result=True)
 
         # Write to output video if specified
         if out:
-            out.write(result)
+            out.write(frame)
 
-        # Display the result
-        cv2.imshow("Lane Detection - Video", result)
+        if lane_detection_result.valid:
+            empty_frame = np.zeros_like(frame)
+            visualization = visualize_boundaries_and_midline(
+                empty_frame,
+                lane_detection_result.left_boundary,
+                lane_detection_result.right_boundary,
+                lane_detection_result.midline
+            )
+            cv2.imshow("Lane Boundaries and Midline", visualization)
+
+        cv2.imshow("Lane Detection - Video", frame)
 
         # Press 'q' to quit
         if cv2.waitKey(1) & 0xFF == ord('q'):
