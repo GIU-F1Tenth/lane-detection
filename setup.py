@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 from glob import glob
 import os
 
-package_name = 'lane-detection'
+package_name = 'lane_detection'
 
 setup(
     name=package_name,

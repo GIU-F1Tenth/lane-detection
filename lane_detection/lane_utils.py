@@ -1,7 +1,6 @@
 import numpy as np
 import cv2
-from typing import Tuple, Optional
-from lane_data import _LaneBoundary, _LaneMidline
+from .lane_data import _LaneBoundary, _LaneMidline
 
 
 def extract_boundary_points(

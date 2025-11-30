@@ -10,7 +10,7 @@ import os
 def generate_launch_description():    
     # Default parameter file path
     default_params_file = PathJoinSubstitution([
-        FindPackageShare('lane-detection'),
+        FindPackageShare('lane_detection'),
         'config',
         'params.yaml'
     ])
@@ -36,7 +36,7 @@ def generate_launch_description():
     
     # Lane detection node
     lane_detection_node = Node(
-        package='lane-detection',
+        package='lane_detection',
         executable='lane_detection_node',
         name='lane_detection_node',
         output='screen',
