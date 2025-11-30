@@ -1,0 +1,132 @@
+# Lane Detection ROS2 Node Parameters
+
+lane_detection_node:
+  ros__parameters:
+    # ============================================================================
+    # ROS2 Topic Configuration
+    # ============================================================================
+    
+    # Input topic for camera images
+    camera_topic: "/camera/image_raw"
+    
+    # Output topics for lane detection results (nav_msgs/Path)
+    left_boundary_topic: "/lane_detection/left_boundary"
+    right_boundary_topic: "/lane_detection/right_boundary"
+    midline_topic: "/lane_detection/midline"
+    
+    # Optional: publish visualization image
+    visualization_topic: "/lane_detection/visualization"
+    publish_visualization: true
+    
+    # Frame ID for output messages
+    output_frame_id: "camera"
+    
+    # ============================================================================
+    # Processing Configuration
+    # ============================================================================
+    
+    # Queue size for subscribers/publishers
+    queue_size: 10
+    
+    # Process every Nth frame (1 = process all frames)
+    frame_skip: 1
+    
+    # ============================================================================
+    # Region of Interest (ROI) Configuration
+    # ============================================================================
+    # These define the trapezoid region to focus on for lane detection
+    # Values are in normalized coordinates (0.0 to 1.0) relative to image size
+    
+    roi:
+      top_left_x: 0.45      # Horizontal position (0=left, 1=right)
+      top_left_y: 0.8       # Vertical position (0=top, 1=bottom)
+      bottom_left_x: 0.3
+      bottom_left_y: 0.95
+      bottom_right_x: 0.55
+      bottom_right_y: 0.95
+      top_right_x: 0.55
+      top_right_y: 0.8
+      
+      # Perspective transform padding (0.0 to 0.5)
+      perspective_padding: 0.25
+      
+      # Display ROI overlay on visualization
+      show_roi: true
+      roi_color_b: 0        # BGR color
+      roi_color_g: 165
+      roi_color_r: 255
+      roi_alpha: 0.2
+      roi_border_thickness: 2
+    
+    # ============================================================================
+    # Sliding Window Parameters
+    # ============================================================================
+    
+    sliding_window:
+      num_windows: 9
+      window_margin_ratio: 0.083333  # 1/12
+      min_pixels_ratio: 0.041667     # 1/24
+    
+    # ============================================================================
+    # Edge Detection Thresholds
+    # ============================================================================
+    
+    edge_detection:
+      lightness_thresh_min: 120
+      lightness_thresh_max: 255
+      sobel_kernel: 3
+      sobel_thresh_min: 110
+      sobel_thresh_max: 255
+      gaussian_blur_kernel: 3
+    
+    # ============================================================================
+    # Color Channel Thresholds
+    # ============================================================================
+    
+    color_thresholds:
+      saturation_thresh_min: 100
+      saturation_thresh_max: 255
+      red_channel_thresh_min: 200
+      red_channel_thresh_max: 255
+    
+    # ============================================================================
+    # Real-World Conversion Factors
+    # ============================================================================
+    
+    calibration:
+      ym_per_pix: 0.041667   # 30.0 / 720
+      xm_per_pix: 0.0052857  # 3.7 / 700
+    
+    # ============================================================================
+    # Display Settings
+    # ============================================================================
+    
+    display:
+      font_scale_ratio: 0.001        # 0.6 / 600
+      text_thickness: 2
+      text_color_b: 255
+      text_color_g: 255
+      text_color_r: 255
+      text_y_offset_1: 30
+      text_y_offset_2: 60
+      text_x_offset: 10
+      
+      lane_color_b: 0        # BGR color for lane overlay
+      lane_color_g: 255
+      lane_color_r: 0
+      lane_alpha: 0.3
+    
+    # ============================================================================
+    # Lane Boundary Output Configuration
+    # ============================================================================
+    
+    output:
+      # Number of points to sample along each boundary
+      num_boundary_points: 50
+      
+      # Number of waypoints for midline
+      num_midline_points: 50
+      
+      # Show direction arrows on visualization
+      show_arrows: true
+      arrow_spacing: 5
